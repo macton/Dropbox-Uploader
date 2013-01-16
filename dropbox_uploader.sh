@@ -59,15 +59,15 @@ API_INFO_URL="https://api.dropbox.com/1/account/info"
 APP_CREATE_URL="https://www2.dropbox.com/developers/apps"
 RESPONSE_FILE="$TMP_DIR/du_resp_$RANDOM"
 CHUNK_FILE="$TMP_DIR/du_chunk_$RANDOM"
-BIN_DEPS="sed basename date grep stat dd"
-VERSION="0.11.3"
+BIN_DEPS="sed basename date grep cut stat dd"
+VERSION="0.11.2"
 
 umask 077
 
 #Check the shell
 if [ -z "$BASH_VERSION" ]; then
     echo -e "Error: this script requires BASH shell!"
-    exit 1
+    
 fi 
 
 if [ $DEBUG -ne 0 ]; then
@@ -79,7 +79,7 @@ fi
 function print
 {
     if [ $VERBOSE -eq 1 ]; then
-	    echo -ne "$1";
+        echo -ne "$1";
     fi
 }
 
@@ -128,6 +128,7 @@ function usage() {
     echo -e "\t download [REMOTE_FILE] <LOCAL_FILE>"
     echo -e "\t delete   [REMOTE_FILE]"
     echo -e "\t list     <REMOTE_DIR>"
+    echo -e "\t sync     <REMOTE_DIR>"
     echo -e "\t info"
     echo -e "\t unlink"
     
@@ -141,15 +142,6 @@ if [ -z "$CURL_BIN" ]; then
     CURL_BIN="curl"   
 fi
 
-#DEPENDENCIES CHECK
-for i in $BIN_DEPS; do
-    which $i > /dev/null
-    if [ $? -ne 0 ]; then
-        echo -e "Error: Required program could not be found: $i"
-        remove_temp_files
-        exit 1
-    fi
-done
 
 #Simple file upload
 #$1 = Local source file
@@ -168,7 +160,7 @@ function db_upload
  
     print " > Uploading $FILE_SRC to $2... \n"  
     time=$(utime)
-    $CURL_BIN $CURL_ACCEPT_CERTIFICATES $CURL_PARAMETERS -i --globoff -o "$RESPONSE_FILE" --upload-file "$FILE_SRC" "$API_UPLOAD_URL/$ACCESS_LEVEL/$FILE_DST?oauth_consumer_key=$APPKEY&oauth_token=$OAUTH_ACCESS_TOKEN&oauth_signature_method=PLAINTEXT&oauth_signature=$APPSECRET%26$OAUTH_ACCESS_TOKEN_SECRET&oauth_timestamp=$time&oauth_nonce=$RANDOM"
+    $CURL_BIN $CURL_ACCEPT_CERTIFICATES $CURL_PARAMETERS -i -o "$RESPONSE_FILE" --upload-file "$FILE_SRC" "$API_UPLOAD_URL/$ACCESS_LEVEL/$FILE_DST?oauth_consumer_key=$APPKEY&oauth_token=$OAUTH_ACCESS_TOKEN&oauth_signature_method=PLAINTEXT&oauth_signature=$APPSECRET%26$OAUTH_ACCESS_TOKEN_SECRET&oauth_timestamp=$time&oauth_nonce=$RANDOM"
            
     #Check
     grep "HTTP/1.1 200 OK" "$RESPONSE_FILE" > /dev/null
@@ -309,7 +301,9 @@ function db_download
     print " > Downloading \"$1\" to \"$FILE_DST\"... \n"  
     time=$(utime)
     $CURL_BIN $CURL_ACCEPT_CERTIFICATES $CURL_PARAMETERS --globoff -D "$RESPONSE_FILE" -o "$FILE_DST" "$API_DOWNLOAD_URL/$ACCESS_LEVEL/$FILE_SRC?oauth_consumer_key=$APPKEY&oauth_token=$OAUTH_ACCESS_TOKEN&oauth_signature_method=PLAINTEXT&oauth_signature=$APPSECRET%26$OAUTH_ACCESS_TOKEN_SECRET&oauth_timestamp=$time&oauth_nonce=$RANDOM"
-           
+          
+     
+ 
     #Check
     grep "HTTP/1.1 200 OK" "$RESPONSE_FILE" > /dev/null
     if [ $? -eq 0 ]; then
@@ -432,16 +426,16 @@ function db_list
             echo "$DIR_CONTENT" | sed -n 's/.*"path": *"\([^"]*\)",.*"is_dir": *\([^"]*\),.*/\1:\2/p' > $RESPONSE_FILE
             
             #For each line...
-            while read -r line; do
+            while read line; do
             
-                local FILE=${line%:*}
-                FILE=${FILE##*/}
-                local TYPE=${line#*:}
+                local FILE=$(echo "$line" | cut -f 1 -d ':')
+                FILE=$(basename "$FILE")
+                local TYPE=$(echo "$line" | cut -f 2 -d ':')
                 
                 if [ "$TYPE" == "false" ]; then
-                    printf " [F] $FILE\n"
+                    echo " [F] $FILE"
                 else
-                    printf " [D] $FILE\n"
+                    echo " [D] $FILE"
                 fi
             done < $RESPONSE_FILE
         
@@ -458,6 +452,147 @@ function db_list
         exit 1
     fi
 }
+
+#List remote directory
+#$1 = Remote directory
+function db_sync
+{
+    local DIR_DST=$1
+    local RESPONSE_FILESYNC="$TMP_DIR/du_resp_$RANDOM"
+        
+    print " > Listing \"$1\"... "  
+    time=$(utime)
+    $CURL_BIN $CURL_ACCEPT_CERTIFICATES -s --show-error --globoff -i -o "$RESPONSE_FILE" "$API_METADATA_URL/$ACCESS_LEVEL/$DIR_DST?oauth_consumer_key=$APPKEY&oauth_token=$OAUTH_ACCESS_TOKEN&oauth_signature_method=PLAINTEXT&oauth_signature=$APPSECRET%26$OAUTH_ACCESS_TOKEN_SECRET&oauth_timestamp=$time&oauth_nonce=$RANDOM"
+   
+    #Check
+    grep "HTTP/1.1 200 OK" "$RESPONSE_FILE" > /dev/null
+    if [ $? -eq 0 ]; then
+        
+        local IS_DIR=$(sed -n 's/^\(.*\)\"contents":.\[.*/\1/p' "$RESPONSE_FILE")
+                   
+        #It's a directory
+        if [ ! -z "$IS_DIR" ]; then
+        
+            print "DONE\n"
+
+            mkdir "$DIR_DST"
+            cd  "$DIR_DST"
+        
+            #Extracting directory content [...]
+            #and replacing "}, {" with "}\n{"
+            #I don't like this piece of code... but seems to be the only way to do this with SED, writing a portable code...
+            local DIR_CONTENTSYNC=$(sed -n 's/.*: \[{\(.*\)/\1/p' "$RESPONSE_FILE" | sed 's/}, *{/}\
+{/g')
+
+            
+            
+            #Extracing files and subfolders
+            echo "$DIR_CONTENTSYNC" | sed -n 's/.*"path": *"\([^"]*\)",.*"is_dir": *\([^"]*\),.*/\1:\2/p' > $RESPONSE_FILESYNC
+            
+            #For each line...
+            while read line; do
+            
+                local FILE=$(echo "$line" | cut -f 1 -d ':')
+                FILE=$(basename "$FILE")
+                local TYPE=$(echo "$line" | cut -f 2 -d ':')
+                
+                if [ "$TYPE" == "false" ]; then
+                    db_download "$FILE" "$FILE"
+                    
+                else
+                    mkdir "$FILE"
+            cd  "$FILE"
+            db_nested_sync "$DIR_DST/$FILE"
+                    cd ..
+                fi
+
+
+                
+
+            done < $RESPONSE_FILESYNC
+        
+        #It's a file
+        else
+            print "FAILED $DIR_DST is not a directory!\n"
+            remove_temp_files
+            exit 1
+        fi
+        
+    else    
+        print "FAILED\n"
+        remove_temp_files
+        exit 1
+    fi
+}
+
+
+#List remote directory
+#$1 = Remote directory
+function db_nested_sync
+{
+    local DIR_DST=$1
+    local RESPONSE_FILESYNC="$TMP_DIR/du_resp_$RANDOM"
+        
+    print " > Listing \"$1\"... "  
+    time=$(utime)
+    $CURL_BIN $CURL_ACCEPT_CERTIFICATES -s --show-error --globoff -i -o "$RESPONSE_FILE" "$API_METADATA_URL/$ACCESS_LEVEL/$DIR_DST?oauth_consumer_key=$APPKEY&oauth_token=$OAUTH_ACCESS_TOKEN&oauth_signature_method=PLAINTEXT&oauth_signature=$APPSECRET%26$OAUTH_ACCESS_TOKEN_SECRET&oauth_timestamp=$time&oauth_nonce=$RANDOM"
+   
+    #Check
+    grep "HTTP/1.1 200 OK" "$RESPONSE_FILE" > /dev/null
+    if [ $? -eq 0 ]; then
+        
+        local IS_DIR=$(sed -n 's/^\(.*\)\"contents":.\[.*/\1/p' "$RESPONSE_FILE")
+                   
+        #It's a directory
+        if [ ! -z "$IS_DIR" ]; then
+        
+            print "DONE\n"
+        
+            #Extracting directory content [...]
+            #and replacing "}, {" with "}\n{"
+            #I don't like this piece of code... but seems to be the only way to do this with SED, writing a portable code...
+            local DIR_CONTENTSYNC=$(sed -n 's/.*: \[{\(.*\)/\1/p' "$RESPONSE_FILE" | sed 's/}, *{/}\
+{/g')
+
+            
+            
+            #Extracing files and subfolders
+            echo "$DIR_CONTENTSYNC" | sed -n 's/.*"path": *"\([^"]*\)",.*"is_dir": *\([^"]*\),.*/\1:\2/p' > $RESPONSE_FILESYNC
+            
+            #For each line...
+            while read line; do
+            
+                local FILE=$(echo "$line" | cut -f 1 -d ':')
+                FILE=$(basename "$FILE")
+                local TYPE=$(echo "$line" | cut -f 2 -d ':')
+                
+                if [ "$TYPE" == "false" ]; then
+                    db_download "$DIR_DST/$FILE" "$FILE"
+                    
+                else
+                    mkdir "$FILE"
+            cd  "$FILE"
+            db_nested_sync "$DIR_DST/$FILE"
+                    cd ..
+                fi
+               
+
+            done < $RESPONSE_FILESYNC
+        
+        #It's a file
+        else
+            print "FAILED $DIR_DST is not a directory!\n"
+            remove_temp_files
+            exit 1
+        fi
+        
+    else    
+        print "FAILED\n"
+        remove_temp_files
+        exit 1
+    fi
+}
+
 
 ################
 #### SETUP  ####
@@ -532,7 +667,7 @@ else
     #TOKEN REQUESTS
     echo -ne "\n > Token request... "
     time=$(utime)
-    $CURL_BIN $CURL_ACCEPT_CERTIFICATES -s --show-error --globoff -i -o $RESPONSE_FILE --data "oauth_consumer_key=$APPKEY&oauth_signature_method=PLAINTEXT&oauth_signature=$APPSECRET%26&oauth_timestamp=$time&oauth_nonce=$RANDOM" "$API_REQUEST_TOKEN_URL"
+    $CURL_BIN $CURL_ACCEPT_CERTIFICATES -s --show-error -i -o $RESPONSE_FILE --data "oauth_consumer_key=$APPKEY&oauth_signature_method=PLAINTEXT&oauth_signature=$APPSECRET%26&oauth_timestamp=$time&oauth_nonce=$RANDOM" "$API_REQUEST_TOKEN_URL"
     OAUTH_TOKEN_SECRET=$(sed -n 's/oauth_token_secret=\([a-z A-Z 0-9]*\).*/\1/p' "$RESPONSE_FILE")
     OAUTH_TOKEN=$(sed -n 's/.*oauth_token=\([a-z A-Z 0-9]*\)/\1/p' "$RESPONSE_FILE")
 
@@ -555,7 +690,7 @@ else
         #API_ACCESS_TOKEN_URL
         echo -ne " > Access Token request... "
         time=$(utime)
-        $CURL_BIN $CURL_ACCEPT_CERTIFICATES -s --show-error --globoff -i -o $RESPONSE_FILE --data "oauth_consumer_key=$APPKEY&oauth_token=$OAUTH_TOKEN&oauth_signature_method=PLAINTEXT&oauth_signature=$APPSECRET%26$OAUTH_TOKEN_SECRET&oauth_timestamp=$time&oauth_nonce=$RANDOM" "$API_ACCESS_TOKEN_URL"
+        $CURL_BIN $CURL_ACCEPT_CERTIFICATES -s --show-error -i -o $RESPONSE_FILE --data "oauth_consumer_key=$APPKEY&oauth_token=$OAUTH_TOKEN&oauth_signature_method=PLAINTEXT&oauth_signature=$APPSECRET%26$OAUTH_TOKEN_SECRET&oauth_timestamp=$time&oauth_nonce=$RANDOM" "$API_ACCESS_TOKEN_URL"
         OAUTH_ACCESS_TOKEN_SECRET=$(sed -n 's/oauth_token_secret=\([a-z A-Z 0-9]*\)&.*/\1/p' "$RESPONSE_FILE")
         OAUTH_ACCESS_TOKEN=$(sed -n 's/.*oauth_token=\([a-z A-Z 0-9]*\)&.*/\1/p' "$RESPONSE_FILE")
         OAUTH_ACCESS_UID=$(sed -n 's/.*uid=\([0-9]*\)/\1/p' "$RESPONSE_FILE")
@@ -684,6 +819,22 @@ case $COMMAND in
         db_list "$DIR_DST"
 
     ;;
+
+    
+    sync)
+
+        DIR_DST=$2
+
+        #Checking DIR_DST
+        if [ -z "$DIR_DST" ]; then
+            DIR_DST="/"
+        fi
+
+        db_sync "$DIR_DST"
+
+
+    ;;
+    
         
     unlink)
     

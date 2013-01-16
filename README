@@ -45,6 +45,9 @@ Commands:
  unlink
  - Unlink this script from your Dropbox account
 
+ sync <REMOTE_DIRECTORY>
+ - Recursively download directory <REMOTE_DIRECTORY>
+
 Examples:
     ./dropbox_uploader.sh upload /etc/passwd /myfiles/passwd.old
     ./dropbox_uploader.sh upload /etc/passwd
@@ -60,6 +63,7 @@ FreeBSD 8.3
 MacOSX
 Windows/Cygwin
 Raspberry Pi
+Samsung ARM Chromebook
 
 If you have successfully tested this script on others systems or platforms please let me know!
 
